@@ -38,7 +38,8 @@ import openpi.models.lora as lora
 import openpi.shared.array_typing as at
 import openpi.training.sharding as sharding
 
-PALIGEMMA_VOCAB_SIZE = 257_152
+PALIGEMMA_VOCAB_SIZE = 257_152  # PaliGemma: 256k base + 1024 location + 128 segmentation
+GEMMA3_VOCAB_SIZE = 262_144  # Gemma3: 262k tokens (improved CJK tokenization)
 
 
 @dataclasses.dataclass
@@ -49,10 +50,22 @@ class Config:
     num_heads: int
     num_kv_heads: int
     head_dim: int
+    vocab_size: int  # Vocabulary size (257152 for PaliGemma, 262144 for Gemma3)
     lora_configs: dict[str, lora.LoRAConfig] = dataclasses.field(default_factory=dict)
 
 
-Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
+Variant = Literal[
+    "dummy",
+    "gemma_300m",
+    "gemma_300m_lora",
+    "gemma_2b",
+    "gemma_2b_lora",
+    "gemma_2b_lora_32",
+    "gemma3_4b",
+    "gemma3_4b_lora",
+    "gemma3_300m",
+    "gemma3_300m_lora",
+]
 
 
 def get_config(variant: Variant) -> Config:
@@ -65,6 +78,7 @@ def get_config(variant: Variant) -> Config:
             num_heads=8,
             num_kv_heads=1,
             head_dim=16,
+            vocab_size=PALIGEMMA_VOCAB_SIZE,
         )
     if variant == "gemma_300m":
         # 311M params
@@ -75,6 +89,7 @@ def get_config(variant: Variant) -> Config:
             num_heads=8,
             num_kv_heads=1,
             head_dim=256,
+            vocab_size=PALIGEMMA_VOCAB_SIZE,
         )
     if variant == "gemma_2b":
         return Config(
@@ -84,6 +99,7 @@ def get_config(variant: Variant) -> Config:
             num_heads=8,
             num_kv_heads=1,
             head_dim=256,
+            vocab_size=PALIGEMMA_VOCAB_SIZE,
         )
     if variant == "gemma_2b_lora":
         return Config(
@@ -93,7 +109,19 @@ def get_config(variant: Variant) -> Config:
             num_heads=8,
             num_kv_heads=1,
             head_dim=256,
+            vocab_size=PALIGEMMA_VOCAB_SIZE,
             lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0), "ffn": lora.LoRAConfig(rank=16, alpha=16.0)},
+        )
+    if variant == "gemma_2b_lora_32":
+        return Config(
+            width=2048,
+            depth=18,
+            mlp_dim=16_384,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+            vocab_size=PALIGEMMA_VOCAB_SIZE,
+            lora_configs={"attn": lora.LoRAConfig(rank=32, alpha=32.0), "ffn": lora.LoRAConfig(rank=32, alpha=32.0)},
         )
     if variant == "gemma_300m_lora":
         # 311M params
@@ -104,7 +132,59 @@ def get_config(variant: Variant) -> Config:
             num_heads=8,
             num_kv_heads=1,
             head_dim=256,
+            vocab_size=PALIGEMMA_VOCAB_SIZE,
             lora_configs={"attn": lora.LoRAConfig(rank=32, alpha=32.0), "ffn": lora.LoRAConfig(rank=32, alpha=32.0)},
+        )
+    if variant == "gemma3_4b":
+        # Gemma 3 4B-IT parameters (actual checkpoint: google/gemma-3/flax/gemma3-4b-it)
+        # This is a VLM with SigLIP vision encoder + Gemma3 language model
+        # Actual dimensions from the checkpoint (not the published 4B spec)
+        return Config(
+            width=2560,  # Actual hidden dim from checkpoint
+            depth=34,  # 34 transformer layers (layer_0 to layer_33)
+            mlp_dim=10240,  # MLP hidden dim (4x width)
+            num_heads=8,  # 8 attention heads (not 16)
+            num_kv_heads=4,  # GQA with 4 KV heads
+            head_dim=256,
+            vocab_size=GEMMA3_VOCAB_SIZE,  # Gemma3 tokenizer with 262k tokens
+        )
+    if variant == "gemma3_4b_lora":
+        # Gemma 3 4B-IT with LoRA for memory-efficient fine-tuning
+        return Config(
+            width=2560,
+            depth=34,
+            mlp_dim=10240,
+            num_heads=8,
+            num_kv_heads=4,
+            head_dim=256,
+            vocab_size=GEMMA3_VOCAB_SIZE,  # Gemma3 tokenizer with 262k tokens
+            lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0), "ffn": lora.LoRAConfig(rank=16, alpha=16.0)},
+        )
+    if variant == "gemma3_300m":
+        # Action expert for Gemma3-based models
+        # Matches Gemma3 depth (34 layers) but with scaled-down dimensions
+        # Results in ~567M parameters
+        # Initialized randomly, trained from scratch via flow matching
+        return Config(
+            width=1024,
+            depth=34,  # Same as Gemma3 to satisfy depth assertion
+            mlp_dim=4096,
+            num_heads=8,
+            num_kv_heads=1,  # MQA like original gemma_300m
+            head_dim=256,
+            vocab_size=GEMMA3_VOCAB_SIZE,  # Gemma3 tokenizer with 262k tokens
+        )
+    if variant == "gemma3_300m_lora":
+        # Action expert with LoRA for memory-efficient fine-tuning
+        return Config(
+            width=1024,
+            depth=34,
+            mlp_dim=4096,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+            vocab_size=GEMMA3_VOCAB_SIZE,  # Gemma3 tokenizer with 262k tokens
+            lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0), "ffn": lora.LoRAConfig(rank=16, alpha=16.0)},
         )
     raise ValueError(f"Unknown variant: {variant}")
 
@@ -352,7 +432,7 @@ class Module(nn.Module):
         assert all(config.depth == self.configs[0].depth for config in self.configs)
 
         self.embedder = Embedder(
-            vocab_size=PALIGEMMA_VOCAB_SIZE,
+            vocab_size=self.configs[0].vocab_size,  # use vocab size from first expert
             embed_dim=self.configs[0].width,  # embedder for first expert only
             name="embedder",
         )

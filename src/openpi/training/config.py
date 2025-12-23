@@ -113,24 +113,41 @@ class ModelTransformFactory(GroupFactory):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
             case _model.ModelType.PI0:
+                # Determine which tokenizer to use based on model variant
+                if isinstance(model_config, pi0_config.Pi0Config):
+                    # Use Gemma3Tokenizer if using Gemma3 variants, otherwise PaligemmaTokenizer
+                    tokenizer_cls = (
+                        _tokenizer.Gemma3Tokenizer
+                        if "gemma3" in model_config.paligemma_variant
+                        else _tokenizer.PaligemmaTokenizer
+                    )
+                else:
+                    tokenizer_cls = _tokenizer.PaligemmaTokenizer
+
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
                         _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                            tokenizer_cls(model_config.max_token_len),
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0Config)
+                # Use Gemma3Tokenizer if using Gemma3 variants, otherwise PaligemmaTokenizer
+                tokenizer_cls = (
+                    _tokenizer.Gemma3Tokenizer
+                    if "gemma3" in model_config.paligemma_variant
+                    else _tokenizer.PaligemmaTokenizer
+                )
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
                         _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                            tokenizer_cls(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
@@ -760,6 +777,76 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_gemma3_libero",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=7,  # LIBERO Panda robot: 6 joints + 1 gripper
+            action_horizon=10,
+            paligemma_variant="gemma3_4b_lora",  # Use Gemma3 as VLM with LoRA
+            action_expert_variant="gemma3_300m_lora",  # Action expert with LoRA
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,  # Pi0.5 doesn't need extra delta transform
+        ),
+        # Load Gemma3 VLM weights, action expert will be randomly initialized
+        weight_loader=weight_loaders.Gemma3WeightLoader(target_img_size=224),
+        # Training hyperparameters
+        num_train_steps=30_000,
+        batch_size=64,  # Adjust based on GPU memory
+        # LoRA training: freeze non-LoRA weights
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma3_4b_lora",
+            action_expert_variant="gemma3_300m_lora",
+        ).get_freeze_filter(),
+        ema_decay=None,  # Turn off EMA for LoRA training
+        # Learning rate schedule
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=1e-4,
+            decay_steps=30_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Logging and checkpointing
+        log_interval=100,
+        save_interval=1000,
+        num_workers=4,
+    ),
+    TrainConfig(
+        name="pi05_gemma3_libero_full_finetune",
+        # Full fine-tuning version (no LoRA) - requires more GPU memory
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=7,
+            action_horizon=10,
+            paligemma_variant="gemma3_4b",  # No LoRA
+            action_expert_variant="gemma3_300m",  # No LoRA
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        weight_loader=weight_loaders.Gemma3WeightLoader(target_img_size=224),
+        num_train_steps=30_000,
+        batch_size=32,  # Smaller batch size for full fine-tuning
+        freeze_filter=nnx.Nothing(),  # Don't freeze anything
+        ema_decay=0.999,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        log_interval=100,
+        save_interval=1000,
+        num_workers=4,
     ),
     #
     # Fine-tuning Aloha configs.

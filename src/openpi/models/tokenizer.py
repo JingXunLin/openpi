@@ -369,3 +369,59 @@ class FSQTokenizer:
         if isinstance(tokens, list):
             tokens = np.array(tokens)
         return self._paligemma_tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
+
+
+class Gemma3Tokenizer:
+    """Tokenizer for Gemma3 VLM with 262k vocab (improved CJK tokenization).
+    
+    Uses the Gemma3 tokenizer from google/gemma-3-4b-it model.
+    Compatible with Pi0 and Pi0.5 models using Gemma3 as the VLM backbone.
+    """
+
+    def __init__(self, max_len: int = 48):
+        self._max_len = max_len
+
+        # Load Gemma3 tokenizer from Kaggle cache
+        from pathlib import Path
+        gemma3_path = Path("/mnt/shared/NTU_Shared/kagglehub/models/google/gemma-3/flax/gemma3-4b-it/1")
+        tokenizer_path = gemma3_path / "tokenizer.model"
+        
+        if not tokenizer_path.exists():
+            raise FileNotFoundError(
+                f"Gemma3 tokenizer not found at {tokenizer_path}. "
+                f"Download using: kagglehub.model_download('google/gemma-3/flax/gemma3-4b-it')"
+            )
+        
+        with tokenizer_path.open("rb") as f:
+            self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+        
+        logging.info(f"Loaded Gemma3 tokenizer with vocab size: {self._tokenizer.vocab_size()}")
+
+    def tokenize(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")
+        if state is not None:
+            # This is the Pi05 format, where the state is part of the discrete language input.
+            discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
+            state_str = " ".join(map(str, discretized_state))
+            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+            tokens = self._tokenizer.encode(full_prompt, add_bos=True)
+        else:
+            # This is the Pi0 format, where the state is part of the continuous action expert input.
+            # tokenize "\n" separately as the "start of answer" token
+            tokens = self._tokenizer.encode(cleaned_text, add_bos=True) + self._tokenizer.encode("\n")
+        tokens_len = len(tokens)
+        if tokens_len < self._max_len:
+            padding = [False] * (self._max_len - tokens_len)
+            mask = [True] * tokens_len + padding
+            tokens = tokens + padding
+        else:
+            if len(tokens) > self._max_len:
+                logging.warning(
+                    f"Token length ({len(tokens)}) exceeds max length ({self._max_len}), truncating. "
+                    "Consider increasing the `max_token_len` in your model config if this happens frequently."
+                )
+            tokens = tokens[: self._max_len]
+            mask = [True] * self._max_len
+
+        return np.asarray(tokens), np.asarray(mask)
+
