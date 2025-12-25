@@ -138,7 +138,7 @@ class Gemma3WeightLoader(WeightLoader):
         from pathlib import Path
 
         # Load from Kaggle cache
-        ckpt_path = Path("/mnt/shared/NTU_Shared/kagglehub/models/google/gemma-3/flax/gemma3-4b-it/1/gemma3-4b-it")
+        ckpt_path = Path("/root/.cache/kagglehub/models/google/gemma-3/flax/gemma3-4b-it/1/gemma3-4b-it")
         if not ckpt_path.exists():
             raise FileNotFoundError(
                 f"Gemma3 checkpoint not found at {ckpt_path}. "

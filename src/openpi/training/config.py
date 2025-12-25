@@ -796,7 +796,7 @@ _CONFIGS = [
         weight_loader=weight_loaders.Gemma3WeightLoader(target_img_size=224),
         # Training hyperparameters
         num_train_steps=30_000,
-        batch_size=64,  # Adjust based on GPU memory
+        batch_size=16,  # Adjust based on GPU memory
         # LoRA training: freeze non-LoRA weights
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
@@ -816,6 +816,7 @@ _CONFIGS = [
         log_interval=100,
         save_interval=1000,
         num_workers=4,
+        fsdp_devices=2,
     ),
     TrainConfig(
         name="pi05_gemma3_libero_full_finetune",

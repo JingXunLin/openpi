@@ -383,7 +383,7 @@ class Gemma3Tokenizer:
 
         # Load Gemma3 tokenizer from Kaggle cache
         from pathlib import Path
-        gemma3_path = Path("/mnt/shared/NTU_Shared/kagglehub/models/google/gemma-3/flax/gemma3-4b-it/1")
+        gemma3_path = Path("/root/.cache/kagglehub/models/google/gemma-3/flax/gemma3-4b-it/1")
         tokenizer_path = gemma3_path / "tokenizer.model"
         
         if not tokenizer_path.exists():

@@ -170,7 +170,7 @@ def get_config(variant: Variant) -> Config:
             depth=34,  # Same as Gemma3 to satisfy depth assertion
             mlp_dim=4096,
             num_heads=8,
-            num_kv_heads=1,  # MQA like original gemma_300m
+            num_kv_heads=4,  # MQA like original gemma_300m
             head_dim=256,
             vocab_size=GEMMA3_VOCAB_SIZE,  # Gemma3 tokenizer with 262k tokens
         )
@@ -181,7 +181,7 @@ def get_config(variant: Variant) -> Config:
             depth=34,
             mlp_dim=4096,
             num_heads=8,
-            num_kv_heads=1,
+            num_kv_heads=4,
             head_dim=256,
             vocab_size=GEMMA3_VOCAB_SIZE,  # Gemma3 tokenizer with 262k tokens
             lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0), "ffn": lora.LoRAConfig(rank=16, alpha=16.0)},
