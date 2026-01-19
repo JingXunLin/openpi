@@ -147,15 +147,40 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
+        if hasattr(model, "compute_loss_with_features"):
+            chunked_loss, features = model.compute_loss_with_features(rng, observation, actions, train=True)
+            return jnp.mean(chunked_loss), features
+        
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        return jnp.mean(chunked_loss), {}
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, features), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
+    
+    # Compute features for similarity monitoring
+    features_info = {}
+    if features:
+        # Compute cosine similarity between instruction and action features
+        instruction_feats = features["instruction_features"]  # [B, D]
+        action_feats = features["action_features"]  # [B, D]
+        
+        # Cosine similarity: (a · b) / (||a|| * ||b||)
+        dot_product = jnp.sum(instruction_feats * action_feats, axis=-1)  # [B]
+        instruction_norm = jnp.linalg.norm(instruction_feats, axis=-1)  # [B]
+        action_norm = jnp.linalg.norm(action_feats, axis=-1)  # [B]
+        cosine_sim = dot_product / (instruction_norm * action_norm + 1e-8)  # [B]
+        
+        features_info = {
+            "cosine_similarity_inst_action": jnp.mean(cosine_sim),
+            "instruction_feature_norm": jnp.mean(instruction_norm),
+            "action_feature_norm": jnp.mean(action_norm),
+        }
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -187,6 +212,7 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        **features_info,  # Add feature similarity metrics
     }
     return new_state, info
 

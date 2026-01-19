@@ -223,6 +223,56 @@ class Pi0(_model.BaseModel):
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
+    def compute_loss_with_features(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
+        """Compute loss and return intermediate features for monitoring.
+        
+        Returns:
+            loss: The computed loss
+            features: Dict containing:
+                - instruction_features: Features from language tokens (prefix_out)
+                - action_features: Features from action expert (suffix_out)
+        """
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+
+        batch_shape = actions.shape[:-2]
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        # one big forward pass of prefix + suffix at once
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        
+        # Extract features for monitoring
+        # Language/instruction features: use the last valid token from prefix (before action tokens)
+        # We'll take mean over sequence dimension to get a single vector per batch element
+        instruction_features = jnp.mean(prefix_out, axis=1)  # [B, D]
+        
+        # Action features: from the action expert output
+        action_features = jnp.mean(suffix_out[:, -self.action_horizon :], axis=1)  # [B, D]
+        
+        features = {
+            "instruction_features": instruction_features,
+            "action_features": action_features,
+        }
+        
+        return loss, features
+
     @override
     def sample_actions(
         self,
