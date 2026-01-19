@@ -20,6 +20,7 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
+    vision_encoder_lora: bool = False  # Enable LoRA for vision encoder
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -82,6 +83,8 @@ class Pi0Config(_model.BaseModelConfig):
         has_lora = False
         gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
         action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
+        vision_encoder_params_filter = nnx_utils.PathRegex(".*img.*")
+        
         if "lora" in self.paligemma_variant:
             filters.append(
                 gemma_params_filter,
@@ -96,6 +99,11 @@ class Pi0Config(_model.BaseModelConfig):
             filters.append(
                 action_expert_params_filter,
             )
+            has_lora = True
+        
+        if self.vision_encoder_lora:
+            # Freeze vision encoder base params, but allow LoRA params to train
+            filters.append(vision_encoder_params_filter)
             has_lora = True
 
         if has_lora:

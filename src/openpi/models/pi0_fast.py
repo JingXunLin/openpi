@@ -11,6 +11,7 @@ from typing_extensions import override
 
 from openpi.models import model as _model
 import openpi.models.gemma_fast as _gemma
+import openpi.models.lora as lora
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
@@ -77,6 +78,7 @@ def put_along_last_axis(arr, indices, values):
 class Pi0FASTConfig(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
+    vision_encoder_lora: bool = False  # Enable LoRA for vision encoder
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -126,8 +128,21 @@ class Pi0FASTConfig(_model.BaseModelConfig):
 
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
         """Returns the freeze filter based on the model config."""
+        filters = []
+        has_lora = False
+        
         if "lora" in self.paligemma_variant:
-            return nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*")))
+            filters.append(nnx_utils.PathRegex(".*llm.*"))
+            has_lora = True
+        
+        if self.vision_encoder_lora:
+            filters.append(nnx_utils.PathRegex(".*img.*"))
+            has_lora = True
+        
+        if has_lora:
+            filters.append(nnx.Not(nnx_utils.PathRegex(".*lora.*")))
+            return nnx.All(*filters)
+        
         return nnx.Nothing
 
 
@@ -144,6 +159,12 @@ class Pi0FAST(_model.BaseModel):
             )
         )
         llm.lazy_init(rngs=rngs, method="init")
+        
+        # Create vision encoder with optional LoRA
+        vision_lora_config = None
+        if config.vision_encoder_lora:
+            vision_lora_config = lora.LoRAConfig(rank=16, alpha=16.0)
+        
         img = nnx_bridge.ToNNX(
             _siglip.Module(
                 num_classes=paligemma_config.width,
@@ -151,6 +172,7 @@ class Pi0FAST(_model.BaseModel):
                 pool_type="none",
                 scan=True,
                 dtype_mm=config.dtype,
+                lora_config=vision_lora_config,
             )
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
@@ -165,7 +187,8 @@ class Pi0FAST(_model.BaseModel):
         token_embeddings = []
         # embed images
         for name in obs.images:
-            image_token_embeddings, _ = self.PaliGemma.img(obs.images[name], train=False)
+            # Use self.deterministic to control training mode for vision encoder
+            image_token_embeddings, _ = self.PaliGemma.img(obs.images[name], train=not self.deterministic)
 
             token_embeddings.append(image_token_embeddings)
             input_mask.append(

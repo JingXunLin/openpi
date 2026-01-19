@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
+import openpi.shared.nnx_utils as nnx_utils
 from typing_extensions import override
 import tyro
 
@@ -966,6 +967,166 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     # RoboArena & PolaRiS configs.
+    # Use pi05 for PaliGemma 2B based experiments
+
+    # Experiment Group 1: Freeze Base PaliGemma (No Forgetting)
+    TrainConfig(
+        name="pi05_freeze_base_libero",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=1e-4,  # Higher LR for frozen backbone
+            decay_steps=50_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Load original PaliGemma weights
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        # Freeze LLM backbone, but allow Action Expert (suffix _1) to train
+        freeze_filter=nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")),
+        ),
+        num_train_steps=50_000,  # More steps for convergence
+        save_interval=5000,
+        fsdp_devices=2,
+    ),
+
+    # Experiment Group 2: LoRA Base PaliGemma (Controlled Adaptation)
+    TrainConfig(
+        name="pi05_lora_base_libero",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",  # LoRA variant
+            action_horizon=10,
+            discrete_state_input=False
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Load original PaliGemma weights
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        # Freeze base weights, train LoRA and Action Expert
+        # Using the helper method from Pi0Config
+        freeze_filter=pi0_config.Pi0Config(pi05=True, paligemma_variant="gemma_2b_lora").get_freeze_filter(),
+        num_train_steps=30_000,
+        save_interval=5000,
+        ema_decay=None, # Turn off EMA for LoRA finetuning
+        fsdp_devices=2,
+    ),
+
+    # Experiment Group 3: Pretrained PaliGemma (Forgotten Group)
+    TrainConfig(
+        name="pi05_pretrained_libero",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=20_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # Load robot-pretrained weights (pi05_base)
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # Full Fine-tuning (No freeze)
+        num_train_steps=20_000, # Fast convergence expected
+        save_interval=2000,
+        fsdp_devices=2,
+    ),
+
+    # Experiment Group 4: Freeze VLM + Train Vision Encoder & Action Expert
+    TrainConfig(
+        name="pi05_finetune_vision_libero",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=1e-4,
+            decay_steps=50_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Load original PaliGemma weights
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        # Freeze only LLM backbone (not Action Expert, not Vision Encoder)
+        # This allows Vision Encoder and Action Expert to be trained
+        # NOTE: Vision Encoder is currently hardcoded with train=False in pi0.py line 114
+        # To enable Vision Encoder training, modify:
+        #   self.PaliGemma.img(obs.images[name], train=False) -> train=not self.deterministic
+        freeze_filter=nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),  # Match all LLM params
+            nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")),  # Exclude Action Expert
+        ),
+        num_train_steps=50_000,
+        save_interval=5000,
+        fsdp_devices=2,
+    ),
+
+    # Experiment Group 5: Freeze VLM + LoRA Vision Encoder + Train Action Expert
+    TrainConfig(
+        name="pi05_lora_vision_libero",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            vision_encoder_lora=True,  # Enable LoRA for vision encoder
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=1e-4,
+            decay_steps=50_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # Load original PaliGemma weights
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(),
+        # Freeze LLM backbone and vision encoder base params
+        # Train Action Expert and vision encoder LoRA params
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            vision_encoder_lora=True,
+        ).get_freeze_filter(),
+        num_train_steps=50_000,
+        save_interval=5000,
+        ema_decay=None,  # Turn off EMA for LoRA finetuning
+        fsdp_devices=2,
+    ),
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
 ]

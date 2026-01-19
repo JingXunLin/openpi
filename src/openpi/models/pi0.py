@@ -10,6 +10,7 @@ from typing_extensions import override
 from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
+import openpi.models.lora as lora
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
@@ -78,6 +79,12 @@ class Pi0(_model.BaseModel):
             )
         )
         llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
+        
+        # Create vision encoder with optional LoRA
+        vision_lora_config = None
+        if config.vision_encoder_lora:
+            vision_lora_config = lora.LoRAConfig(rank=16, alpha=16.0)
+        
         img = nnx_bridge.ToNNX(
             _siglip.Module(
                 num_classes=paligemma_config.width,
@@ -85,6 +92,7 @@ class Pi0(_model.BaseModel):
                 pool_type="none",
                 scan=True,
                 dtype_mm=config.dtype,
+                lora_config=vision_lora_config,
             )
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
@@ -111,7 +119,9 @@ class Pi0(_model.BaseModel):
         tokens = []
         # embed images
         for name in obs.images:
-            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
+            # Use self.deterministic to control training mode for vision encoder
+            # When deterministic=False (training), vision encoder will update BatchNorm/Dropout
+            image_tokens, _ = self.PaliGemma.img(obs.images[name], train=not self.deterministic)
 
             tokens.append(image_tokens)
             input_mask.append(
